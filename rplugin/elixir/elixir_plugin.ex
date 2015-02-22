@@ -15,7 +15,7 @@ defmodule MixAndComplete do
         Logger.info("Load project #{Mix.Project.config[:app]}")
       end
       if File.exists?(mix_dir<>"/config/config.exs"), do: 
-        Mix.Task.run("loadconfig", [mix_dir<>"/config/config.exs"])
+      Mix.Task.run("loadconfig", [mix_dir<>"/config/config.exs"])
       :file.set_cwd('#{mix_dir}') # if your application read files
       for p<-Path.wildcard("#{mix_dir}/_build/#{Mix.env}/lib/*/ebin"), do: :code.add_pathz('#{p}')
     else
@@ -55,43 +55,65 @@ defmodule MixAndComplete do
       bindings
     catch
       kind,err-> 
-        format_err = Exception.format(kind,err,System.stacktrace)
-        File.write! "#{tmp_dir}/preview.ex","#{format_err}\n\n#{format_bindings current_bindings}"
-        current_bindings
+      format_err = Exception.format(kind,err,System.stacktrace)
+      File.write! "#{tmp_dir}/preview.ex","#{format_err}\n\n#{format_bindings current_bindings}"
+      current_bindings
     end
     NVim.vim_command("pedit! #{tmp_dir}/preview.ex")
     {:ok,nil,%{state| current_bindings: bindings}}
   end
 
-  deffunc elixir_complete("1",_,cursor,line,state), eval: "col('.')", eval: "getline('.')" do
-    cursor = cursor - 1 # because we are in insert mode
-    [tomatch] = Regex.run(~r"[\w\.:]*$",String.slice(line,0..cursor-1))
-    cursor - String.length(tomatch)
+  defp alt_for_comp(base, comp) do
+    {base,comp} = {String.replace(base,~r"[^.]*$",""), to_string(comp)}
+    case Regex.run(~r"^(.*)/([0-9]+)$",comp) do # first see if these choices are module or function
+      [_,function,arity] ->
+        # it is a function completion
+        # replace = base <> function
+        replace = function
+
+        module = if String.last(base) == "." do
+          Module.concat([String.slice(base, 0..-2)])
+        else
+          Kernel
+        end
+
+        if (docs=Code.get_docs(module,:docs)) && (doc=List.keyfind(docs,{:"#{function}",elem(Integer.parse(arity),0)},0)) && (docmd=elem(doc,4)) do
+          %{
+            "word" => replace,
+            "kind" => if(elem(doc,2)==:def, do: "f", else: "m"),
+            "abbr" => comp,
+            "info" => docmd}
+        else
+          %{"word" => replace, "abbr" => comp}
+        end
+      nil ->
+        # it is a module completion
+        module = base<>comp
+        case Code.get_docs(Module.concat([module]),:moduledoc) do
+          {_,moduledoc} -> %{"word"=>module, "info"=>moduledoc}
+          _             -> %{"word"=>module}
+        end
+    end
   end
-  deffunc elixir_complete(_,base,_,_,state), eval: "col('.')", eval: "getline('.')" do
-    case (base |> to_char_list |> Enum.reverse |> IEx.Autocomplete.expand) do
-      {:no,_,_}-> [base] # no expand
-      {:yes,comp,[]}->["#{base}#{comp}"] #simple expand, no choices
-      {:yes,_,alts}-> # multiple choices
-        Enum.map(alts,fn comp->
-          {base,comp} = {String.replace(base,~r"[^.]*$",""), to_string(comp)}
-          case Regex.run(~r"^(.*)/([0-9]+)$",comp) do # first see if these choices are module or function
-            [_,function,arity]-> # it is a function completion
-              replace = base<>function
-              module = if String.last(base) == ".", do: Module.concat([String.slice(base,0..-2)]), else: Kernel
-              if (docs=Code.get_docs(module,:docs)) && (doc=List.keyfind(docs,{:"#{function}",elem(Integer.parse(arity),0)},0)) && (docmd=elem(doc,4)) do
-                 %{"word"=>replace,"kind"=> if(elem(doc,2)==:def, do: "f", else: "m"), "abbr"=>comp,"info"=>docmd}
-              else
-                %{"word"=>replace,"abbr"=>comp}
-              end
-            nil-> # it is a module completion
-              module = base<>comp
-              case Code.get_docs(Module.concat([module]),:moduledoc) do
-                {_,moduledoc} -> %{"word"=>module,"info"=>moduledoc}
-                _ -> %{"word"=>module}
-              end
-          end
-        end)
+
+  deffunc elixir_complete(x,_,cursor,line,state), eval: "col('.')", eval: "getline('.')" do
+    cursor = cursor - 1
+    [base] = Regex.run(~r"[\w\.:]*$", String.slice(line, 0..cursor-1))
+
+    if x != 1 do
+      case (base |> to_char_list |> Enum.reverse |> IEx.Autocomplete.expand) do
+        {:no, _, _} -> [base] # no expand
+        # {:no,_,_}-> -2
+        {:yes, comp, []} -> ["#{base}#{comp}"] #simple expand, no choices
+        {:yes, _,  alts} ->
+          # multiple choices
+          alts |> Enum.map &alt_for_comp(base, &1)
+      end
+    else
+      case (base |> to_char_list |> Enum.reverse |> IEx.Autocomplete.expand) do
+        {:no,_,_} -> -2
+        {:yes,_,_} -> cursor - String.length(base)
+      end
     end
   end
 end
